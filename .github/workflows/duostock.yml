@@ -1,0 +1,25 @@
+name: duostock
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: duostock
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Watch Apple pickup stock
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          MAX_RUNTIME_MIN: "340"
+          NOTIFY_ON_START: "0"
+        run: node duostock.mjs
