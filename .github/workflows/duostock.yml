@@ -8,6 +8,10 @@ concurrency:
   group: duostock
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   watch:
     runs-on: ubuntu-latest
@@ -21,5 +25,11 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           MAX_RUNTIME_MIN: "340"
-          NOTIFY_ON_START: "0"
         run: node duostock.mjs
+      - name: Start the next run (keeps it going 24/7 without relying on cron)
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 20
+          gh workflow run duostock.yml --repo ${{ github.repository }}
