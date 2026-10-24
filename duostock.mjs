@@ -134,7 +134,7 @@ async function poll() {
       log(`poll #${state.polls}: ${rows.length} combos checked, ${nowAvail.length} available`);
       // Status report on the first check of each run, then after every N checks where nothing was in stock
       if (nowAvail.length === 0 && (state.noStockPolls === 1 || state.noStockPolls % CFG.digestEvery === 0)) {
-        await notify({ title: `Duo: not available (check #${state.polls})`, message: digest(rows), priority: "low", tags: "x" });
+        await notify({ title: `Duo: not available (check #${state.polls})`, message: digest(rows), priority: "high", tags: "x" });
       }
     }
   } catch (e) {
