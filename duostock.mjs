@@ -19,6 +19,9 @@ const CFG = {
   quiet: env.QUIET === "1",
   digestEvery: Number(env.DIGEST_EVERY || 10),          // status report after every N checks with nothing in stock
   failExitAfter: Number(env.FAIL_EXIT_AFTER || 0),      // >0: after N failed checks in a row, exit so a fresh runner takes over (GitHub Actions)
+  workerId: env.WORKER_ID || "",                        // hot standby: set A/B/C on each copy; empty = standalone
+  hbTtlSec: Number(env.HB_TTL_SEC || 75),               // another worker counts as alive if its heartbeat is newer than this
+  standbyPollSec: Number(env.STANDBY_POLL_SEC || 10),   // how often a standby looks for a dead/released active worker
   blockedStreak: Number(env.BLOCKED_STREAK || 0),       // how many runs in a row ended blocked before this one (passed in by the workflow)
 };
 
@@ -113,6 +116,27 @@ function digest(rows) {
   return `Checked apple.com/ca pickup at ${when} PT\nNone in stock at any of ${byStore.size} stores (${rows.length} store/model checks):\n\n${lines.join("\n\n")}\n\nChecking every ${CFG.intervalSec}s.`;
 }
 
+// ---- Hot standby coordination (only when WORKER_ID is set) ----
+// The active worker posts a heartbeat to a private ntfy topic ("<topic>-hb"; not your alert topic, so no phone noise).
+// Standbys only read that topic, so Apple still gets exactly one check per interval overall.
+const hbUrl = () => `${CFG.ntfyServer}/${encodeURIComponent(CFG.topic + "-hb")}`;
+async function hbSend(kind) {
+  try { await fetch(hbUrl(), { method: "POST", body: `${kind}:${CFG.workerId}`, signal: AbortSignal.timeout(8000) }); }
+  catch (e) { log("hb send failed:", e.message); }
+}
+async function aliveOthers() {
+  try {
+    const r = await fetch(`${hbUrl()}/json?poll=1&since=3m`, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return [];
+    const last = new Map();
+    const evs = (await r.text()).split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((e) => e && e.event === "message").sort((a, b) => a.time - b.time);
+    for (const e of evs) { const [kind, id] = String(e.message).split(":"); last.set(id, { kind, time: e.time }); }
+    const now = Date.now() / 1000;
+    return [...last].filter(([id, v]) => id !== CFG.workerId && v.kind === "hb" && now - v.time <= CFG.hbTtlSec).map(([id]) => id);
+  } catch (e) { log("hb read failed:", e.message); return []; }
+}
+
 async function poll() {
   state.polls++;
   try {
@@ -176,13 +200,27 @@ async function main() {
   log(`DuoStock up. Watching ${Object.values(PARTS).join(", ")} at ${STORES.join(",")} every ${CFG.intervalSec}s. ntfy topic: ${CFG.topic ? "set" : "NOT SET (console only)"}`);
   startStatusServer();
   const deadline = CFG.maxRuntimeMin ? Date.now() + CFG.maxRuntimeMin * 60e3 : Infinity;
+  const hot = !!(CFG.workerId && CFG.topic);
+  let active = !hot;
   while (Date.now() < deadline) {
+    if (!active) {
+      const others = await aliveOthers();
+      if (others.length === 0) { active = true; log(`worker ${CFG.workerId}: taking over as active checker`); }
+      else { await sleep(CFG.standbyPollSec * 1000); continue; }
+    }
     const t0 = Date.now();
     await poll();
-    if (env.ONCE === "1" || state.exitBlocked) break;
+    if (state.exitBlocked) break;
+    if (hot) {
+      await hbSend("hb");
+      const others = await aliveOthers();
+      if (others.some((id) => id < CFG.workerId)) { active = false; log(`worker ${CFG.workerId}: yielding to ${others.join(",")}`); }
+    }
+    if (env.ONCE === "1") break;
     // Exactly one check per interval: next check starts intervalSec after this one STARTED
     await sleep(Math.max(0, CFG.intervalSec * 1000 - (Date.now() - t0)));
   }
+  if (hot && active) await hbSend("rel");   // runtime limit or blocked: tell standbys to take over now
   if (state.exitBlocked) {
     // Blocked: hand over to a fresh runner (workflow reads these outputs). A run that worked before it got blocked restarts the count at 1.
     const streak = state.successes > 0 ? 1 : CFG.blockedStreak + 1;
