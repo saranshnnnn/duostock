@@ -32,6 +32,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           MAX_RUNTIME_MIN: "340"
           FAIL_EXIT_AFTER: "3"
+          WORKER_ID: "A"
           BLOCKED_STREAK: ${{ inputs.blocked_streak || '0' }}
           QUIET: "1"
         run: node duostock.mjs
