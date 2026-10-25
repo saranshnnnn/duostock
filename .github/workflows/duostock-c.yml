@@ -1,0 +1,46 @@
+name: duostock-c
+# Hot-standby worker C (see duostock.yml).
+on:
+  schedule:
+    - cron: "12,27,42,57 * * * *"
+  workflow_dispatch:
+    inputs:
+      blocked_streak:
+        description: "How many runs in a row ended blocked"
+        default: "0"
+
+concurrency:
+  group: duostock-c
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Watch Apple pickup stock
+        id: watch
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          MAX_RUNTIME_MIN: "340"
+          FAIL_EXIT_AFTER: "3"
+          WORKER_ID: "C"
+          BLOCKED_STREAK: ${{ inputs.blocked_streak || '0' }}
+          QUIET: "1"
+        run: node duostock.mjs
+      - name: Start the next run
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BLOCKED: ${{ steps.watch.outputs.blocked }}
+          STREAK: ${{ steps.watch.outputs.streak }}
+        run: |
+          if [ "$BLOCKED" = "1" ]; then sleep 60; S="$STREAK"; else sleep 20; S=0; fi
+          gh workflow run duostock-c.yml --repo ${{ github.repository }} -f blocked_streak="$S"
