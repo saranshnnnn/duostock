@@ -1,8 +1,14 @@
 name: duostock
+# Free 24/7 hosting on a PUBLIC repo. Each run polls Apple every 45s for ~5h40m, then starts the next run itself.
+# If Apple blocks the runner's IP (HTTP 541), the run exits after 3 failed checks and a fresh runner (new IP) takes over.
 on:
   schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {}
+    - cron: "*/15 * * * *"   # backup starter, queued behind the active run
+  workflow_dispatch:
+    inputs:
+      blocked_streak:
+        description: "How many runs in a row ended blocked"
+        default: "0"
 
 concurrency:
   group: duostock
@@ -19,17 +25,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        with: { node-version: 22 }
       - name: Watch Apple pickup stock
+        id: watch
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           MAX_RUNTIME_MIN: "340"
+          FAIL_EXIT_AFTER: "3"
+          BLOCKED_STREAK: ${{ inputs.blocked_streak || '0' }}
+          QUIET: "1"
         run: node duostock.mjs
-      - name: Start the next run (keeps it going 24/7 without relying on cron)
+      - name: Start the next run
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
+          BLOCKED: ${{ steps.watch.outputs.blocked }}
+          STREAK: ${{ steps.watch.outputs.streak }}
         run: |
-          sleep 20
-          gh workflow run duostock.yml --repo ${{ github.repository }}
+          if [ "$BLOCKED" = "1" ]; then sleep 60; S="$STREAK"; else sleep 20; S=0; fi
+          gh workflow run duostock.yml --repo ${{ github.repository }} -f blocked_streak="$S"
