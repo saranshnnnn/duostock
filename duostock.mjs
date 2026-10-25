@@ -3,6 +3,7 @@
 // Zero dependencies. Needs Node 18+.  Run:  NTFY_TOPIC=your-secret-topic node duostock.mjs
 
 import http from "node:http";
+import fs from "node:fs";
 
 const env = process.env;
 const CFG = {
@@ -17,6 +18,8 @@ const CFG = {
   heartbeatHours: Number(env.HEARTBEAT_HOURS || 24),    // "still alive" ping; 0 = off
   quiet: env.QUIET === "1",
   digestEvery: Number(env.DIGEST_EVERY || 10),          // status report after every N checks with nothing in stock
+  failExitAfter: Number(env.FAIL_EXIT_AFTER || 0),      // >0: after N failed checks in a row, exit so a fresh runner takes over (GitHub Actions)
+  blockedStreak: Number(env.BLOCKED_STREAK || 0),       // how many runs in a row ended blocked before this one (passed in by the workflow)
 };
 
 // Canadian part numbers (apple.com/ca iPhone Duo). Edit to taste.
@@ -39,6 +42,7 @@ const state = {
   polls: 0, failures: 0, consecutiveFailures: 0,
   lastOk: null, lastError: null, lastSnapshot: [], startedAt: Date.now(),
   failAlerted: false, lastHeartbeat: Date.now(), noStockPolls: 0,
+  successes: 0, exitBlocked: false, recoveredNotified: false,
 };
 
 async function notify({ title, message, priority = "default", tags = "iphone", click = BUY_URL }) {
@@ -113,7 +117,11 @@ async function poll() {
   state.polls++;
   try {
     const rows = flatten(await fetchPickup());
-    state.lastOk = Date.now(); state.consecutiveFailures = 0; state.lastSnapshot = rows;
+    state.lastOk = Date.now(); state.consecutiveFailures = 0; state.lastSnapshot = rows; state.successes++;
+    if (CFG.blockedStreak >= 5 && !state.recoveredNotified) {
+      state.recoveredNotified = true;
+      await notify({ title: "DuoStock recovered", message: "Apple checks are working again on a fresh runner.", tags: "white_check_mark" });
+    }
     if (state.failAlerted) { state.failAlerted = false; await notify({ title: "DuoStock recovered", message: "Apple checks are working again.", tags: "white_check_mark" }); }
 
     const nowAvail = rows.filter((r) => r.available);
@@ -140,6 +148,7 @@ async function poll() {
   } catch (e) {
     state.failures++; state.consecutiveFailures++; state.lastError = `${e.message} @ ${new Date().toISOString()}`;
     log(`poll #${state.polls} FAILED (${state.consecutiveFailures} in a row):`, e.message);
+    if (CFG.failExitAfter && state.consecutiveFailures >= CFG.failExitAfter) { state.exitBlocked = true; return; }
     if (state.consecutiveFailures >= CFG.failAlertAfter && !state.failAlerted) {
       state.failAlerted = true;
       await notify({ title: "DuoStock is blind", message: `${state.consecutiveFailures} failed checks in a row. Last error: ${e.message}. Apple may be blocking this host.`, priority: "high", tags: "warning" });
@@ -170,9 +179,19 @@ async function main() {
   while (Date.now() < deadline) {
     const t0 = Date.now();
     await poll();
-    if (env.ONCE === "1") break;
+    if (env.ONCE === "1" || state.exitBlocked) break;
     // Exactly one check per interval: next check starts intervalSec after this one STARTED
     await sleep(Math.max(0, CFG.intervalSec * 1000 - (Date.now() - t0)));
+  }
+  if (state.exitBlocked) {
+    // Blocked: hand over to a fresh runner (workflow reads these outputs). A run that worked before it got blocked restarts the count at 1.
+    const streak = state.successes > 0 ? 1 : CFG.blockedStreak + 1;
+    log(`blocked (${state.lastError}); exiting so a fresh runner takes over. Blocked runs in a row: ${streak}`);
+    if (env.GITHUB_OUTPUT) fs.appendFileSync(env.GITHUB_OUTPUT, `blocked=1\nstreak=${streak}\n`);
+    if (streak === 5 || (streak > 5 && streak % 60 === 0)) {
+      await notify({ title: "DuoStock is blind", message: `Apple keeps blocking the checker (${streak} runners in a row, last error: ${state.lastError}). Still retrying on fresh runners.`, priority: "high", tags: "warning" });
+    }
+    return;
   }
   log("exiting (runtime limit or ONCE)");
 }
