@@ -17,7 +17,7 @@ const CFG = {
   failAlertAfter: Number(env.FAIL_ALERT_AFTER || 10),   // consecutive failures before "I'm blind" alert
   heartbeatHours: Number(env.HEARTBEAT_HOURS || 24),    // "still alive" ping; 0 = off
   quiet: env.QUIET === "1",
-  digestEvery: Number(env.DIGEST_EVERY || 10),          // status report after every N checks with nothing in stock
+  digestEvery: Number(env.DIGEST_EVERY || 0),          // status report after every N checks with nothing in stock
   failExitAfter: Number(env.FAIL_EXIT_AFTER || 0),      // >0: after N failed checks in a row, exit so a fresh runner takes over (GitHub Actions)
   workerId: env.WORKER_ID || "",                        // hot standby: set A/B/C on each copy; empty = standalone
   hbTtlSec: Number(env.HB_TTL_SEC || 75),               // another worker counts as alive if its heartbeat is newer than this
@@ -165,7 +165,7 @@ async function poll() {
     } else {
       log(`poll #${state.polls}: ${rows.length} combos checked, ${nowAvail.length} available`);
       // Status report on the first check of each run, then after every N checks where nothing was in stock
-      if (nowAvail.length === 0 && (state.noStockPolls === 1 || state.noStockPolls % CFG.digestEvery === 0)) {
+      if (CFG.digestEvery > 0 && nowAvail.length === 0 && (state.noStockPolls === 1 || state.noStockPolls % CFG.digestEvery === 0)) {
         await notify({ title: `Duo: not available (check #${state.polls})`, message: digest(rows), priority: "high", tags: "x" });
       }
     }
